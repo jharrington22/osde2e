@@ -83,7 +83,20 @@ func (o *OCMProvider) LaunchCluster(clusterName string) (string, error) {
 		return "", fmt.Errorf("error while determining machine type: %v", err)
 	}
 
-	region, err := o.DetermineRegion(cloudProvider)
+	var region string
+
+	if viper.GetBool(CCS) {
+		awsAccessKey := viper.GetString(AWSAccessKey)
+		awsSecretKey := viper.GetString(AWSSecretKey)
+
+		if awsAccessKey != "" && awsSecretKey != "" {
+			region, err = o.DetermineRegion(cloudProvider)
+		} else {
+			return "", fmt.Errorf("Invalid or no AWS Credentials provided for CCS cluster")
+		}
+
+		region, err = o.DetermineRegion(cloudProvider, AWSAccessKey, AWSSecretKey)
+	}
 
 	if err != nil {
 		return "", fmt.Errorf("error while determining region: %v", err)
@@ -198,21 +211,28 @@ func (o *OCMProvider) LaunchCluster(clusterName string) (string, error) {
 
 // DetermineRegion will return the region provided by configs. This mainly wraps the random functionality for use
 // by the ROSA provider.
-func (o *OCMProvider) DetermineRegion(cloudProvider string) (string, error) {
+func (o *OCMProvider) DetermineRegion(cloudProvider, awsAccessKey, awsSecretAccessKey string) (string, error) {
 	region := viper.GetString(config.CloudProvider.Region)
 
 	// If a region is set to "random", it will poll OCM for all the regions available
 	// It then will pull a random entry from the list of regions and set the ID to that
 	if region == "random" {
-		regionsClient := o.conn.ClustersMgmt().V1().CloudProviders().CloudProvider(cloudProvider).Regions().List()
 
-		regions, err := regionsClient.Send()
+		awsCredentials, err := v1.NewAWS().
+			AccessKeyID(awsAccessKey).
+			SecretAccessKey(awsSecretAccessKey).
+			Build()
 		if err != nil {
 			return "", err
 		}
-		items := regions.Items().Slice()
 
-		cloudRegion, found := ChooseRandomRegion(toCloudRegions(items)...)
+		response, err := o.conn.ClustersMgmt().V1().CloudProviders().CloudProvider("aws").AvailableRegions().Search().Body(awsCredentials).Send()
+		if err != nil {
+			return "", err
+		}
+		regions := response.Items().Slice()
+
+		cloudRegion, found := ChooseRandomRegion(toCloudRegions(regions)...)
 		if !found {
 			return "", fmt.Errorf("unable to choose a random enabled region")
 		}
